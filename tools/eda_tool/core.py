@@ -100,7 +100,7 @@ def open_dataset(
         kwargs: Dict[str, Any] = {"engine": "cfgrib"}
         if cfgrib_filter:
             kwargs["backend_kwargs"] = {"filter_by_keys": cfgrib_filter}
-        return xr.open_dataset(path, chunks=chunks, storage_options=storage_options, **kwargs)
+        return xr.open_dataset(path, chunks=chunks, **kwargs)
 
     if backend in ("netcdf", "auto"):
         try:

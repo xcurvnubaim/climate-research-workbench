@@ -11,6 +11,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 
+import fsspec
 import numpy as np
 import xarray as xr
 import pandas as pd
@@ -92,14 +93,14 @@ def _open_remote_netcdf(
     """Open a remote NetCDF file using fsspec and h5netcdf.
     
     This handles S3, HTTP, and other remote URLs that netCDF4 cannot open directly.
+    The file object is opened using fsspec's open_files which properly manages the
+    lifecycle of the file object when the dataset is closed.
     """
-    import fsspec
-
     storage_options = storage_options or {}
     
-    # Open the remote file using fsspec
-    fs, fs_path = fsspec.core.url_to_fs(path, **storage_options)
-    file_obj = fs.open(fs_path, mode="rb")
+    # Use fsspec.open which returns a context-managed file object.
+    # xarray keeps a reference to the file object and closes it when ds.close() is called.
+    file_obj = fsspec.open(path, mode="rb", **storage_options).open()
     
     # Use h5netcdf engine which works with file-like objects
     return xr.open_dataset(file_obj, engine="h5netcdf", chunks=chunks)

@@ -4,3 +4,7 @@ numpy
 matplotlib
 cartopy
 scikit-learn
+fsspec
+s3fs
+h5netcdf
+aiohttp

@@ -78,6 +78,33 @@ def pick_default_var(ds: xr.Dataset) -> Optional[str]:
 # =============================
 
 
+def _is_remote_path(path: str) -> bool:
+    """Check if the path is a remote URL (S3, HTTP, etc.)."""
+    path_lower = path.lower()
+    return path_lower.startswith(("s3://", "http://", "https://", "gs://", "gcs://"))
+
+
+def _open_remote_netcdf(
+    path: str,
+    chunks: Optional[Dict[str, int]] = None,
+    storage_options: Optional[Dict[str, Any]] = None,
+) -> xr.Dataset:
+    """Open a remote NetCDF file using fsspec and h5netcdf.
+    
+    This handles S3, HTTP, and other remote URLs that netCDF4 cannot open directly.
+    """
+    import fsspec
+
+    storage_options = storage_options or {}
+    
+    # Open the remote file using fsspec
+    fs, fs_path = fsspec.core.url_to_fs(path, **storage_options)
+    file_obj = fs.open(fs_path, mode="rb")
+    
+    # Use h5netcdf engine which works with file-like objects
+    return xr.open_dataset(file_obj, engine="h5netcdf", chunks=chunks)
+
+
 def open_dataset(
     path: str,
     backend: str,
@@ -103,6 +130,19 @@ def open_dataset(
         return xr.open_dataset(path, chunks=chunks, **kwargs)
 
     if backend in ("netcdf", "auto"):
+        # Handle remote URLs (S3, HTTP, etc.) using fsspec + h5netcdf
+        if _is_remote_path(path):
+            try:
+                return _open_remote_netcdf(path, chunks=chunks, storage_options=storage_options)
+            except Exception as remote_err:
+                # Fall back to direct xr.open_dataset if fsspec approach fails
+                try:
+                    return xr.open_dataset(path, chunks=chunks, engine=None)
+                except Exception:
+                    # Re-raise the original remote error if fallback also fails
+                    raise remote_err
+        
+        # Local file handling
         try:
             return xr.open_dataset(path, chunks=chunks, engine=None)
         except Exception:

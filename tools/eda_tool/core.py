@@ -93,7 +93,7 @@ def _open_remote_netcdf(
     """Open a remote NetCDF file using fsspec and h5netcdf.
     
     This handles S3, HTTP, and other remote URLs that netCDF4 cannot open directly.
-    The file object is opened using fsspec's open_files which properly manages the
+    The file object is opened using fsspec.open() which properly manages the
     lifecycle of the file object when the dataset is closed.
     """
     storage_options = storage_options or {}
@@ -149,7 +149,7 @@ def open_dataset(
         except Exception:
             for eng in ("netcdf4", "h5netcdf", "scipy"):
                 try:
-                    return xr.open_dataset(path, chunks=chunks)
+                    return xr.open_dataset(path, chunks=chunks, engine=eng)
                 except Exception:
                     continue
             raise

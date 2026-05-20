@@ -1,0 +1,24 @@
+metadata:
+  version: 1
+  name: wasabi_data_sources
+
+sources:
+  wasabi_csv_source:
+    driver: csv
+    description: Quarterly data stored in a Wasabi S3-compatible bucket.
+    args:
+      # The URL path must use the s3:// protocol
+      urlpath: "s3://s3.ap-southeast-1.wasabisys.com/aria/quarterly_data.csv"
+      
+      # *** CRITICAL: Specify the Wasabi endpoint using client_kwargs ***
+      storage_options:
+        client_kwargs:
+          # Replace us-east-1 with your specific Wasabi region endpoint
+          endpoint_url: "https://s3.ap-southeast-1.wasabisys.com"
+          
+          # Pass credentials from environment variables (recommended)
+          aws_access_key_id: "{{ env('S3_ACCESS_KEY') }}"
+          aws_secret_access_key: "{{ env('S3_SECRET_KEY') }}"
+
+          # Set signature_version to 's3v4' if needed for compatibility
+          # signature_version: "s3v4"

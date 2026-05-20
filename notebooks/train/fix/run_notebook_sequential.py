@@ -5,6 +5,9 @@ import ssl
 import sys
 import asyncio
 import warnings
+import signal
+import threading
+from datetime import datetime, timezone
 from getpass import getpass
 from pathlib import Path
 
@@ -18,15 +21,27 @@ from urllib3.exceptions import InsecureRequestWarning
 
 notebooks = [
     # "sc2_unet_mae.ipynb",
-    "sc2_gan.ipynb",
+    # "sc2_gan.ipynb",
     # "sc1_convnext_mae.ipynb",
     # "sc1_resnet18.ipynb",
     # "sc2_covnext_mae.ipynb",
     # "sc2_resnet18_mae.ipynb",
+    # "sc1_unet_preupsample.ipynb",
+    # "sc2_unet_mae_preupsample.ipynb",
+    # "sc1_convnext_mae_pixel.ipynb"
+    # "sc1_unet.ipynb",
+    # "sc2_unet_mae_preupsample.ipynb",
+    # "sc1_resnet18_preupsample.ipynb",
+    # "sc2_convnext_mae_preupsample.ipynb",
+    # "sc2_resnet18_mae_preupsample.ipynb",
+    # "sc1_gan.ipynb",
+    # "sc1_convnext_mae_preupsample.ipynb"
+    "sc1_gan_preupsample.ipynb",
+    "sc2_gan_preupsample.ipynb",
 ]
 
-LOOP_PER_NOTEBOOK = 5
-KERNEL_SERVER_URL = "https://10.28.76.90"
+LOOP_PER_NOTEBOOK = 2
+KERNEL_SERVER_URL = "https://server-ta.zmarzuqi.dev"
 USE_REMOTE_KERNEL = bool(KERNEL_SERVER_URL)
 
 # Long training cells can run for many hours.
@@ -34,9 +49,34 @@ USE_REMOTE_KERNEL = bool(KERNEL_SERVER_URL)
 CELL_TIMEOUT = None
 # Keep IOPub wait tolerant for sparse logs (e.g., output every 10+ minutes).
 IOPUB_TIMEOUT_SECONDS = 1200
+# Periodically save in-flight notebook output so progress is visible on disk.
+SAVE_INTERVAL_SECONDS = 60
 
 if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
+shutdown_requested = threading.Event()
+_shutdown_signal_count = 0
+
+
+def _request_shutdown(signum, _frame):
+    global _shutdown_signal_count
+    _shutdown_signal_count += 1
+    signal_name = signal.Signals(signum).name
+
+    if _shutdown_signal_count == 1:
+        print(f"\nReceived {signal_name}. Graceful shutdown requested; finishing current step...")
+        shutdown_requested.set()
+        return
+
+    print(f"\nReceived {signal_name} again. Exiting immediately.")
+    raise SystemExit(130)
+
+
+signal.signal(signal.SIGINT, _request_shutdown)
+if hasattr(signal, "SIGTERM"):
+    signal.signal(signal.SIGTERM, _request_shutdown)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -82,6 +122,35 @@ def patch_notebook_workdir(nb_json, notebook_dir: Path):
 def fetch_local_kernel_names():
     ksm = KernelSpecManager()
     return sorted(ksm.find_kernel_specs().keys())
+
+
+def write_notebook_atomic(nb_json, output_path: Path):
+    tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as f:
+        nbformat.write(nb_json, f)
+    tmp_path.replace(output_path)
+
+
+def write_progress_heartbeat(progress_path: Path, notebook_path: Path, run_idx: int, total_runs: int, nb_json):
+    executed_cells = 0
+    total_code_cells = 0
+    for cell in nb_json.get("cells", []):
+        if cell.get("cell_type") != "code":
+            continue
+        total_code_cells += 1
+        if cell.get("execution_count") is not None:
+            executed_cells += 1
+
+    payload = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "notebook": str(notebook_path),
+        "run_index": run_idx,
+        "total_runs": total_runs,
+        "executed_code_cells": executed_cells,
+        "total_code_cells": total_code_cells,
+        "shutdown_requested": shutdown_requested.is_set(),
+    }
+    progress_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 # ── Auth + Session Setup ──────────────────────────────────────────────────────
@@ -233,6 +302,10 @@ print(f"Selected kernel: {KERNEL_NAME}")
 # ── Run notebooks ─────────────────────────────────────────────────────────────
 
 for notebook_name in notebooks:
+    if shutdown_requested.is_set():
+        print("Shutdown requested. Stopping before next notebook.")
+        break
+
     notebook_path = Path(notebook_name)
     if not notebook_path.exists():
         print(f"Skip (not found): {notebook_path}")
@@ -241,7 +314,11 @@ for notebook_name in notebooks:
     runs_dir = notebook_path.parent / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
 
-    for run_idx in range(1, LOOP_PER_NOTEBOOK + 1):
+    for run_idx in range(3, LOOP_PER_NOTEBOOK + 3):
+        if shutdown_requested.is_set():
+            print("Shutdown requested. Stopping before next run.")
+            break
+
         with notebook_path.open("r", encoding="utf-8") as f:
             nb = nbformat.read(f, as_version=4)
 
@@ -261,23 +338,55 @@ for notebook_name in notebooks:
             ),
         )
 
+        output_path = runs_dir / f"{notebook_path.stem}_run{run_idx}_executed.ipynb"
+        progress_path = runs_dir / f"{notebook_path.stem}_run{run_idx}_progress.json"
+        progress_stop_event = threading.Event()
+
+        def _autosave_loop():
+            while not progress_stop_event.wait(SAVE_INTERVAL_SECONDS):
+                try:
+                    write_notebook_atomic(nb, output_path)
+                    write_progress_heartbeat(progress_path, notebook_path, run_idx, LOOP_PER_NOTEBOOK, nb)
+                    print(f"Checkpoint saved: {output_path.name}")
+                except Exception as exc:
+                    print(f"Checkpoint save failed for {output_path}: {type(exc).__name__}: {exc}")
+
+        progress_thread = threading.Thread(target=_autosave_loop, name=f"autosave-{notebook_path.stem}-run{run_idx}", daemon=True)
+        progress_thread.start()
+
         print(f"Running ({run_idx}/{LOOP_PER_NOTEBOOK}): {notebook_path}")
         run_ok = True
+        interrupted = False
         try:
             client.execute()
+        except KeyboardInterrupt:
+            interrupted = True
+            run_ok = False
+            shutdown_requested.set()
+            print(f"KeyboardInterrupt on {notebook_path} run {run_idx}. Requesting graceful shutdown...")
         except CellExecutionError as exc:
             run_ok = False
             print(f"CellExecutionError on {notebook_path} run {run_idx}: {exc}")
         except Exception as exc:
             run_ok = False
             print(f"Kernel/transport error on {notebook_path} run {run_idx}: {type(exc).__name__}: {exc}")
+        finally:
+            progress_stop_event.set()
+            progress_thread.join(timeout=5)
+            try:
+                client.shutdown_kernel()
+            except Exception:
+                pass
 
-        output_path = runs_dir / f"{notebook_path.stem}_run{run_idx}_executed.ipynb"
-        with output_path.open("w", encoding="utf-8") as f:
-            nbformat.write(nb, f)
+        write_notebook_atomic(nb, output_path)
+        write_progress_heartbeat(progress_path, notebook_path, run_idx, LOOP_PER_NOTEBOOK, nb)
 
         if run_ok:
             print(f"Saved: {output_path}")
         else:
             print(f"Saved partial output: {output_path}")
             print("Continuing to next run...")
+
+        if interrupted or shutdown_requested.is_set():
+            print("Graceful shutdown complete for current run.")
+            break
